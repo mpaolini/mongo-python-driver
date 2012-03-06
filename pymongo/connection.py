@@ -148,6 +148,8 @@ class _Pool(threading.local):
         # We use the pid here to avoid issues with fork / multiprocessing.
         # See test.test_connection:TestConnection.test_fork for an example of
         # what could go wrong otherwise
+        self.sock = (None, self.connect(host, port))
+        return (self.sock[1], False)
         pid = os.getpid()
 
         if pid != self.pid:
