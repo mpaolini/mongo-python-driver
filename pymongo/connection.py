@@ -41,6 +41,7 @@ import sys
 import threading
 import time
 import warnings
+import gevent
 
 from pymongo import (common,
                      database,
@@ -114,6 +115,8 @@ class _Pool(threading.local):
         self.use_ssl = use_ssl
         if not hasattr(self, "sockets"):
             self.sockets = []
+        if not hasattr(self, "g_sockets"):
+            self.g_sockets = {}
 
     def connect(self, host, port):
         """Connect to Mongo and return a new (connected) socket.
@@ -144,12 +147,57 @@ class _Pool(threading.local):
 
         return s
 
+    def greenlet_died(self, greenlet):
+        #print 'greenlet died'
+        try:
+            sock = self.g_sockets.pop(greenlet)
+        except KeyError:
+            pass
+        else:
+            if len(self.sockets) < self.max_size:
+                self.sockets.append(sock)
+            else:
+                #print 'closing socket'
+                sock.close()
+        return
+        
     def get_socket(self, host, port):
         # We use the pid here to avoid issues with fork / multiprocessing.
         # See test.test_connection:TestConnection.test_fork for an example of
         # what could go wrong otherwise
-        self.sock = (None, self.connect(host, port))
-        return (self.sock[1], False)
+        pid = os.getpid()
+
+        if pid != self.pid:
+            self.sockets = []
+            self.g_sockets = {}
+            self.pid = pid
+
+        greenlet = gevent.getcurrent()
+        try:
+            sock = self.g_sockets[greenlet]
+            #print 'OLD'
+            return sock, True
+        except KeyError:
+            try:
+                sock = self.sockets.pop()
+                old = True
+                if hasattr(greenlet, 'link'):
+                    #print 'linking'
+                    greenlet.link(self.greenlet_died)
+                #print 'RECYCLED'
+            except IndexError:
+                sock = self.connect(host, port)
+                if hasattr(greenlet, 'link'):
+                    #print 'linking'
+                    greenlet.link(self.greenlet_died)
+                else:
+                    pass
+                    # print 'can\'t link...'
+                old = False
+                #print 'NEW'
+            self.g_sockets[greenlet] = sock
+            return sock, old
+
         pid = os.getpid()
 
         if pid != self.pid:
@@ -170,11 +218,32 @@ class _Pool(threading.local):
     def discard_socket(self):
         """Close and discard the active socket.
         """
+        greenlet = gevent.getcurrent()
+        try:
+            sock = self.g_sockets[greenlet]
+        except KeyError:
+            pass
+        else:
+            sock.close()
+        return
+
         if self.sock:
             self.sock[1].close()
             self.sock = None
 
     def return_socket(self):
+        greenlet = gevent.getcurrent()
+        try:
+            sock = self.g_sockets.pop(greenlet)
+        except KeyError:
+            pass
+        else:
+            if len(self.sockets) < self.max_size:
+                self.sockets.append(sock)
+            else:
+                sock.close()
+        return
+
         if self.sock is not None and self.sock[0] == os.getpid():
             # There's a race condition here, but we deliberately
             # ignore it.  It means that if the pool_size is 10 we
