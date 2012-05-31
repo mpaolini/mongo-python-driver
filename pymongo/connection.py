@@ -41,7 +41,11 @@ import sys
 import threading
 import time
 import warnings
-import gevent
+# we are imported by setup.py and gevent is not installed yet...
+try:
+    import gevent
+except ImportError:
+    pass
 
 from pymongo import (common,
                      database,
